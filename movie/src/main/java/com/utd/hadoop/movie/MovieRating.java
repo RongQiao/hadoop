@@ -10,12 +10,10 @@ import java.util.TreeMap;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.FloatWritable;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.mapreduce.lib.input.KeyValueTextInputFormat;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
@@ -412,8 +410,8 @@ public class MovieRating {
 	public static class Top5MovieIdMapper
     extends DataMapper{
 		private Text movieID = new Text();
-		private Text top5Rating = new Text("T");
-		
+		private Text top5Rating = new Text();
+
 		/*
 		 * input: key - line offset, value - content of line
 		 * output: key - MovieID, value -  "T"
@@ -421,9 +419,10 @@ public class MovieRating {
 		public void map(LongWritable key, Text value, Context context
 		                 ) throws IOException, InterruptedException {
 			String line = value.toString();
-			
-			if (line.length() > 0){
-				movieID.set(line);
+			String items[] = line.split("\t");
+			if (items.length >= 2){
+				movieID.set(items[0]);
+				top5Rating.set("T"+getSplit()+items[1]);
 				context.write(movieID, top5Rating);
 			}
 		}
@@ -444,11 +443,107 @@ public class MovieRating {
 			String line = value.toString();
 			String[] items = line.split(getSplit());
 			
-			if (items.length >= 3){
-				//items[0]: userId; items[1]: MovieID; items[2]: rating
+			if (items.length >= 2){
+				//items[0]: MovieID; items[1]: Title
+				movieId.set(items[0]);
+				movieTitle.set("M"+getSplit()+items[1]);
 				context.write(movieId, movieTitle);
 			}
 		}
+	}
+	
+	//reducer
+	public static class JoinTop5MovieReducer
+	extends Reducer<Text, Text, Text, Text>{
+		//for out put
+		private Text movieT = new Text();
+		private Text rating = new Text();
+		//for join
+		private List<TopMovieRating> recordTop5 = new ArrayList<TopMovieRating>();
+		private List<MovieTitle> recordTitle = new ArrayList<MovieTitle>();
+		private String getSplit() {
+			return "::";
+		}
+	
+		public void reduce(Text key, Iterable<Text> values,
+                      Context context
+                      ) throws IOException, InterruptedException {
+			recordTop5.clear();
+			recordTitle.clear();
+			
+			String movieId = key.toString();
+			for (Text val: values) {
+				String rc = val.toString();
+				String items[] = rc.split(getSplit());
+				if (val.charAt(0) == 'T') {
+					if (items.length >= 2) {
+						TopMovieRating mr = new TopMovieRating(movieId, items[1]);
+						recordTop5.add(mr);
+					}
+				}
+				else {
+					if (items.length >= 2) {
+						MovieTitle mt = new MovieTitle(movieId, items[1]);
+						recordTitle.add(mt);
+					}
+					
+				}
+			}
+			
+			//join
+			for (TopMovieRating mRating: recordTop5) {
+				for (MovieTitle mTitle: recordTitle) {
+					if (mRating.getMovieId().compareTo(mTitle.getMovieId())==0) {
+						movieT.set(mTitle.getTitle());
+						rating.set(mRating.getRating());
+						context.write(movieT, rating);
+					}
+				}
+			}
+		}
+		
+		private class TopMovieRating{
+			String movieId;
+			String rating;
+			public TopMovieRating(String id, String rt) {
+				setMovieId(id);
+				setRating(rt);
+			}
+			public String getMovieId() {
+				return movieId;
+			}
+			public void setMovieId(String movieId) {
+				this.movieId = movieId;
+			}
+			public String getRating() {
+				return rating;
+			}
+			public void setRating(String rating) {
+				this.rating = rating;
+			}
+		}
+		
+		private class MovieTitle{
+			String movieId;
+			String title;
+			public MovieTitle(String id, String tl) {
+				setMovieId(id);
+				setTitle(tl);
+			}
+			public String getMovieId() {
+				return movieId;
+			}
+			public void setMovieId(String movieId) {
+				this.movieId = movieId;
+			}
+			public String getTitle() {
+				return title;
+			}
+			public void setTitle(String title) {
+				this.title = title;
+			}
+		}
+		
 	}
 
 
@@ -494,14 +589,13 @@ public class MovieRating {
 		jobMvTitle.setJarByClass(MovieRating.class);
 	    //mapper
 		//use MultipleOutputs and specify different Record class and Input formats
-	    MultipleInputs.addInputPath(jobMvTitle, new Path(input1), TextInputFormat.class, Top5Mapper.class);	   
-	    //MultipleInputs.addInputPath(jobMvTitle, new Path(input2), TextInputFormat.class, MovieMapper.class);
+	    MultipleInputs.addInputPath(jobMvTitle, new Path(input1), TextInputFormat.class, Top5MovieIdMapper.class);	   
+	    MultipleInputs.addInputPath(jobMvTitle, new Path(input2), TextInputFormat.class, MoviesMapper.class);
 	    //reducer	    
-	    jobMvTitle.setReducerClass(TopRatingReducer.class);	
-	    jobMvTitle.setOutputKeyClass(NullWritable.class);
+	    jobMvTitle.setReducerClass(JoinTop5MovieReducer.class);	
+	    jobMvTitle.setOutputKeyClass(Text.class);
 	    jobMvTitle.setOutputValueClass(Text.class);
 	    
-	    jobMvTitle.setInputFormatClass(TextInputFormat.class);
 	    FileOutputFormat.setOutputPath(jobMvTitle, new Path(output));
 	    
 	    boolean ret = jobMvTitle.waitForCompletion(true);
@@ -514,19 +608,21 @@ public class MovieRating {
 	    conf.set("data.split", "::");	//all data format is using "::" as split string, so set it as a configuration 
 	    
 	    //job 1
-	    boolean ret = false;
+	    boolean ret = true;
 	    ret = runJob1(conf, args[0], args[1], jobInterMediate[0]);	
-//	    if (ret) {
+	    if (ret) {
 	    	//job 2
 	    	ret = runJob2(conf, jobInterMediate[0]+"/part-r-00000", jobInterMediate[1]);
 	    	if (ret) {
-	    		//ret = runJob3(conf, jobInterMediate[1]+"/part-r-00000", args[2], args[3]);
+	    		ret = runJob3(conf, jobInterMediate[1]+"/part-r-00000", args[2], args[3]);
 	    	}
-//	    }
+	    }
 		
-//	    FileSystem fs = FileSystem.get(conf);
-//		Path tmp = new Path(jobInterMediate);
-//	    fs.delete(tmp, true);
+	    FileSystem fs = FileSystem.get(conf);
+	    for (String pStr: jobInterMediate){
+			Path tmp = new Path(pStr);
+		    fs.delete(tmp, true);
+	    }
 	    System.exit(ret? 0 : 1);
 	}
 
